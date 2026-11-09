@@ -5,7 +5,7 @@ use std::{borrow::Cow, fmt::Write};
 use regex_syntax::{
     ast::{
         self, parse::Parser, Ast, ClassPerl, ClassPerlKind, ClassSetItem, ErrorKind, Literal,
-        LiteralKind, Span, SpecialLiteralKind, Visitor,
+        GroupKind, LiteralKind, Position, Span, SpecialLiteralKind, Visitor,
     },
     hir::{Class, Hir, HirKind},
 };
@@ -191,14 +191,18 @@ fn escape_class_set_syntax(pattern: &str) -> Cow<'_, str> {
 
 struct Ecma262Translator<'a> {
     pattern: Cow<'a, str>,
-    offset: usize,
+    /// Bytes the replacements so far added and removed before the next span. A span starts after
+    /// every byte removed before it, so `offset + added - removed` never underflows.
+    added: usize,
+    removed: usize,
 }
 
 impl<'a> Ecma262Translator<'a> {
     fn new(input: Cow<'a, str>) -> Self {
         Self {
             pattern: input,
-            offset: 0,
+            added: 0,
+            removed: 0,
         }
     }
 
@@ -212,12 +216,13 @@ impl<'a> Ecma262Translator<'a> {
             }
             Cow::Owned(ref mut buffer) => {
                 buffer.replace_range(
-                    start.offset + self.offset..end.offset + self.offset,
+                    start.offset + self.added - self.removed..end.offset + self.added - self.removed,
                     replacement,
                 );
             }
         }
-        self.offset += replacement.len() - (end.offset - start.offset);
+        self.added += replacement.len();
+        self.removed += end.offset - start.offset;
     }
 
     fn replace(&mut self, cls: &ClassPerl) {
@@ -257,6 +262,26 @@ impl<'a> Visitor for Ecma262Translator<'a> {
 
     fn finish(self) -> Result<Self::Output, Self::Err> {
         Ok(self.pattern)
+    }
+
+    // A match never reads a group's capture, so every group is translated as non-capturing: the
+    // engine then keeps no capture slots per state, which otherwise grow with the number of
+    // groups times the subject. Patterns with backreferences never reach the translator.
+    fn visit_pre(&mut self, ast: &Ast) -> Result<(), Self::Err> {
+        if let Ast::Group(group) = ast {
+            let open_end = match &group.kind {
+                GroupKind::CaptureIndex(_) => group.span.start.offset + 1,
+                // `(?<name>` or `(?P<name>`, through the closing `>`.
+                GroupKind::CaptureName { name, .. } => name.span.end.offset + 1,
+                GroupKind::NonCapturing(_) => return Ok(()),
+            };
+            let open = Span::new(
+                group.span.start,
+                Position::new(open_end, group.span.start.line, group.span.start.column),
+            );
+            self.replace_impl(&open, "(?:");
+        }
+        Ok(())
     }
 
     fn visit_class_set_item_pre(&mut self, item: &ast::ClassSetItem) -> Result<(), Self::Err> {
@@ -633,6 +658,13 @@ mod tests {
     #[test_case(r"[^&]", r"[^&]"; "single ampersand is unchanged")]
     #[test_case(r"a&&b", r"a&&b"; "operator syntax outside a class is unchanged")]
     #[test_case(r"\d.[\w.]\D.", r"[0-9][^\n\r\x{2028}\x{2029}][[A-Za-z0-9_].][^0-9][^\n\r\x{2028}\x{2029}]"; "dots mixed with class escapes")]
+    #[test_case(r"(a)", r"(?:a)"; "capturing group")]
+    #[test_case(r"^(a?){3}(b|c)$", r"^(?:a?){3}(?:b|c)$"; "repeated and alternation groups")]
+    #[test_case(r"((a)(b))", r"(?:(?:a)(?:b))"; "nested groups")]
+    #[test_case(r"(?<year>\d{4})-(?<m>\d\d)", r"(?:[0-9]{4})-(?:[0-9][0-9])"; "named groups")]
+    #[test_case(r"(?:a)(?i:b)", r"(?:a)(?i:b)"; "non-capturing groups are unchanged")]
+    #[test_case(r"(.)\d", r"(?:[^\n\r\x{2028}\x{2029}])[0-9]"; "group before a class escape")]
+    #[test_case(r"[(]\((a)", r"[(]\((?:a)"; "parentheses that are not groups")]
     fn test_ecma262_to_rust_regex(input: &str, expected: &str) {
         let result = to_rust_regex(input).unwrap();
         assert_eq!(result, expected);
