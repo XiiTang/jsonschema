@@ -340,6 +340,10 @@ pub enum ValidationErrorKind {
     UniqueItems,
     /// Error during schema ref resolution.
     Referencing(referencing::Error),
+    /// Building the schema or validating the instance needed more stack than is left: the
+    /// schema nests or chains references too deeply, alone or for this instance. Nothing else
+    /// is reported with it, since the run did not finish.
+    StackExhausted,
 }
 
 impl ValidationErrorKind {
@@ -389,6 +393,7 @@ impl ValidationErrorKind {
             ValidationErrorKind::UnevaluatedProperties { .. } => "unevaluatedProperties",
             ValidationErrorKind::UniqueItems => "uniqueItems",
             ValidationErrorKind::Referencing(_) => "$ref",
+            ValidationErrorKind::StackExhausted => "",
         })
     }
 }
@@ -1296,6 +1301,23 @@ impl<'a> ValidationError<'a> {
 }
 
 impl error::Error for ValidationError<'_> {}
+
+const STACK_EXHAUSTED: &str =
+    "the schema nests or chains references deeper than the validator's stack allows";
+
+impl ValidationError<'_> {
+    /// The run needed more stack than is left; `schema_path` is where a build stopped.
+    #[cold]
+    pub(crate) fn stack_exhausted(schema_path: Location) -> Self {
+        ValidationError::new(
+            LazyInstance::Ready(Cow::Owned(Value::Null)),
+            ValidationErrorKind::StackExhausted,
+            Location::new(),
+            schema_path,
+            Location::new(),
+        )
+    }
+}
 impl From<referencing::Error> for ValidationError<'_> {
     #[inline]
     fn from(err: referencing::Error) -> Self {
@@ -1391,6 +1413,7 @@ impl fmt::Display for ValidationError<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self.kind() {
             ValidationErrorKind::Referencing(error) => error.fmt(f),
+            ValidationErrorKind::StackExhausted => f.write_str(STACK_EXHAUSTED),
             ValidationErrorKind::BacktrackLimitExceeded { error } => error.fmt(f),
             ValidationErrorKind::Format { format } => {
                 write!(f, r#"{} is not a "{}""#, self.instance(), format)
@@ -1598,6 +1621,7 @@ impl fmt::Display for MaskedValidationError<'_, '_, '_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self.error.kind() {
             ValidationErrorKind::Referencing(error) => error.fmt(f),
+            ValidationErrorKind::StackExhausted => f.write_str(STACK_EXHAUSTED),
             ValidationErrorKind::BacktrackLimitExceeded { error } => error.fmt(f),
             ValidationErrorKind::Format { format } => {
                 write!(f, r#"{} is not a "{format}""#, self.placeholder)

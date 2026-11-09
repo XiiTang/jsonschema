@@ -1351,6 +1351,7 @@ pub mod paths;
 pub(crate) mod properties;
 pub(crate) mod regex;
 mod retriever;
+mod stack;
 mod unfinished_matches;
 pub mod types {
     pub use jsonschema_value::types::{JsonType, JsonTypeSet, JsonTypeSetIterator};

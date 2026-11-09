@@ -27,6 +27,21 @@ struct SchemaNodeInner<F: Json> {
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 const _: () = assert!(std::mem::size_of::<SchemaNodeInner<SerdeJson>>() == 128);
 
+/// Releasing a node releases the nodes it owns, one call chain per ownership hop. A node may own
+/// a target compiled before it, so the chain can be longer than any recursion of the build that
+/// made it. A release low on stack continues on a new stack segment instead of overflowing.
+impl<F: Json> Drop for SchemaNodeInner<F> {
+    fn drop(&mut self) {
+        if crate::stack::low() {
+            let validators = std::mem::replace(
+                &mut self.validators,
+                NodeValidators::Boolean { validator: None },
+            );
+            stacker::grow(crate::stack::RELEASE_SEGMENT, move || drop(validators));
+        }
+    }
+}
+
 /// The `schemaLocation` an evaluation reports for a subschema, and its absolute location.
 struct SchemaLocation {
     formatted: Arc<str>,
@@ -158,6 +173,9 @@ impl<F: Json> NodeValidators<F> {
     #[allow(clippy::inline_always)]
     #[inline(always)]
     fn is_valid(&self, instance: &F::Node<'_>, ctx: &mut ValidationContext) -> bool {
+        if ctx.stack_low() {
+            return false;
+        }
         match self {
             NodeValidators::Keyword(kvs) => match &kvs.validators {
                 KeywordList::One(entry) => entry.validator.is_valid(instance, ctx),
@@ -412,7 +430,7 @@ impl<F: Json> Validate<F> for PendingSchemaNode<F> {
             PendingTarget::Weak(target) => target,
         };
         let identity = instance.identity();
-        if ctx.enter(target.node_id(), identity) {
+        if ctx.stack_low() || ctx.enter(target.node_id(), identity) {
             return Ok(());
         }
         let result = target
@@ -437,7 +455,7 @@ impl<F: Json> Validate<F> for PendingSchemaNode<F> {
             PendingTarget::Weak(target) => target,
         };
         let identity = instance.identity();
-        if ctx.enter(target.node_id(), identity) {
+        if ctx.stack_low() || ctx.enter(target.node_id(), identity) {
             return;
         }
         target
@@ -483,7 +501,7 @@ impl<F: Json> Validate<F> for PendingSchemaNode<F> {
             PendingTarget::Weak(target) => target,
         };
         let identity = instance.identity();
-        if ctx.enter(target.node_id(), identity) {
+        if ctx.stack_low() || ctx.enter(target.node_id(), identity) {
             return EvaluationResult::valid_empty();
         }
         let result = target.materialize().evaluate_with_location(
@@ -968,6 +986,9 @@ impl<F: Json> Validate<F> for SchemaNode<F> {
         tracker: Option<&RefTracker>,
         ctx: &mut ValidationContext,
     ) -> Result<(), ValidationError<'i>> {
+        if ctx.stack_low() {
+            return Ok(());
+        }
         match &self.inner.validators {
             NodeValidators::Keyword(
                 kvs @ KeywordValidators {
@@ -1039,6 +1060,9 @@ impl<F: Json> Validate<F> for SchemaNode<F> {
         ctx: &mut ValidationContext,
         errors: &mut Vec<ValidationError<'i>>,
     ) {
+        if ctx.stack_low() {
+            return;
+        }
         match &self.inner.validators {
             NodeValidators::Keyword(kvs) => {
                 for (entry, metadata) in kvs.validators.as_slice().iter().zip(&kvs.metadata) {
@@ -1118,6 +1142,9 @@ impl<F: Json> SchemaNode<F> {
         tracker: Option<&RefTracker>,
         ctx: &mut ValidationContext,
     ) -> EvaluationResult {
+        if ctx.stack_low() {
+            return EvaluationResult::valid_empty();
+        }
         match &self.inner.validators {
             NodeValidators::Array { ref validators } => Self::evaluate_subschemas(
                 instance,

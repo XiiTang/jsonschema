@@ -6,8 +6,9 @@ use test_case::test_case;
 
 /// Definitions in each generated `$ref` chain.
 const CHAIN_LENGTH: usize = 1000;
-/// Stack of the thread that builds or drops the validator: far below what one frame per hop would need.
-const SMALL_STACK_SIZE: usize = 256 * 1024;
+/// Stack of the thread that builds or drops the validator: the 256 KiB the stack check keeps free
+/// (`stack::RED_ZONE`) and 256 KiB to work in, far below what one frame per hop would need.
+const SMALL_STACK_SIZE: usize = 512 * 1024;
 /// Definitions in a `$ref` cycle that deferred targets enter again.
 const CYCLE_LENGTH: usize = 64;
 

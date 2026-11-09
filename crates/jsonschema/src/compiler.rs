@@ -1616,6 +1616,9 @@ fn compile_with_internal<'a, F: Json>(
     resource: ResourceRef<'a>,
     alias: Option<Arc<Uri<String>>>,
 ) -> Result<TargetNode<F>, ValidationError<'a>> {
+    if crate::stack::low() {
+        return Err(ValidationError::stack_exhausted(ctx.location().clone()));
+    }
     let key = match find_compiled(ctx, resource, alias.is_some()) {
         Ok(existing) => return Ok(existing),
         Err(key) => key,

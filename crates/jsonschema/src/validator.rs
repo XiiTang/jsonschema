@@ -85,10 +85,13 @@ pub struct ValidationContext {
     /// Outcomes this run assumes for regex matches the engine could not finish; boxed and only
     /// created once one is met, so validation without them carries a single null pointer.
     matches: Option<Box<MatchAssumptions>>,
+    /// Set once the stack ran low: the walk stopped descending there, so no answer computed in
+    /// this run stands, and the public entries report the exhaustion instead.
+    stack_exhausted: bool,
 }
 
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
-const _: () = assert!(std::mem::size_of::<ValidationContext>() == 144);
+const _: () = assert!(std::mem::size_of::<ValidationContext>() == 152);
 
 /// Checks for the state inline when dropped: the drop glue of a plain `Option<Box<_>>` is an
 /// out-of-line call even when there is nothing to free.
@@ -118,10 +121,12 @@ struct LazyState {
     arena: EvaluationArena,
 }
 
-/// Runs `run` in a fresh context that assumes the outcomes in `matches`.
+/// Runs `run` in a fresh context that assumes the outcomes in `matches`, and records in
+/// `stack_exhausted` whether the run ran out of stack.
 #[inline]
 fn in_context<T>(
     matches: &mut Option<Box<MatchAssumptions>>,
+    stack_exhausted: &mut bool,
     run: impl FnOnce(&mut ValidationContext) -> T,
 ) -> T {
     let mut ctx = ValidationContext {
@@ -130,6 +135,7 @@ fn in_context<T>(
     };
     let result = run(&mut ctx);
     *matches = ctx.matches.take();
+    *stack_exhausted |= ctx.stack_exhausted;
     result
 }
 
@@ -147,6 +153,20 @@ const EVALUATION_PATH_CACHE_THRESHOLD: u32 = 4096;
 impl ValidationContext {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether the stack ran low here or earlier in this run. A caller that sees `true` returns
+    /// its cheapest answer without descending.
+    #[inline]
+    pub(crate) fn stack_low(&mut self) -> bool {
+        if self.stack_exhausted {
+            return true;
+        }
+        if crate::stack::low() {
+            self.stack_exhausted = true;
+            return true;
+        }
+        false
     }
 
     /// Whether `regex` matches `subject`; `site` reports a match the engine cannot finish.
@@ -739,6 +759,9 @@ impl<F: Json> Validator<F> {
         let result = self
             .root
             .validate(&instance, &LazyLocation::new(), None, &mut ctx);
+        if ctx.stack_exhausted {
+            return Err(ValidationError::stack_exhausted(Location::new()));
+        }
         match ctx.matches {
             None => result,
             Some(first) => self
@@ -756,7 +779,9 @@ impl<F: Json> Validator<F> {
         let mut errors = Vec::new();
         self.root
             .collect_errors(&instance, &LazyLocation::new(), None, &mut ctx, &mut errors);
-        if let Some(first) = ctx.matches {
+        if ctx.stack_exhausted {
+            errors = vec![ValidationError::stack_exhausted(Location::new())];
+        } else if let Some(first) = ctx.matches {
             errors = self.errors_under_every_outcome(&instance, *first);
         }
         ErrorIterator::from_iterator(errors.into_iter())
@@ -769,6 +794,9 @@ impl<F: Json> Validator<F> {
     pub fn is_valid(&self, instance: F::Node<'_>) -> bool {
         let mut ctx = ValidationContext::new();
         let valid = self.root.is_valid(&instance, &mut ctx);
+        if ctx.stack_exhausted {
+            return false;
+        }
         match ctx.matches {
             None => valid,
             Some(first) => self.valid_under_every_outcome(&instance, *first),
@@ -777,10 +805,16 @@ impl<F: Json> Validator<F> {
 
     #[cold]
     fn valid_under_every_outcome(&self, instance: &F::Node<'_>, first: MatchAssumptions) -> bool {
-        unfinished_matches::validity(assume_each_outcome(
-            |matches| in_context(matches, |ctx| self.root.is_valid(instance, ctx)),
+        let mut stack_exhausted = false;
+        let valid = unfinished_matches::validity(assume_each_outcome(
+            |matches| {
+                in_context(matches, &mut stack_exhausted, |ctx| {
+                    self.root.is_valid(instance, ctx)
+                })
+            },
             first,
-        ))
+        ));
+        valid && !stack_exhausted
     }
 
     #[cold]
@@ -789,9 +823,10 @@ impl<F: Json> Validator<F> {
         instance: &F::Node<'i>,
         first: MatchAssumptions,
     ) -> Vec<ValidationError<'i>> {
+        let mut stack_exhausted = false;
         let outcomes = assume_each_outcome(
             |matches| {
-                in_context(matches, |ctx| {
+                in_context(matches, &mut stack_exhausted, |ctx| {
                     let mut errors = Vec::new();
                     self.root.collect_errors(
                         instance,
@@ -805,6 +840,9 @@ impl<F: Json> Validator<F> {
             },
             first,
         );
+        if stack_exhausted {
+            return vec![ValidationError::stack_exhausted(Location::new())];
+        }
         unfinished_matches::errors(outcomes, || instance.lazy_value())
     }
     /// Evaluate the schema and expose structured output formats.
@@ -815,6 +853,11 @@ impl<F: Json> Validator<F> {
         let root = self
             .root
             .evaluate_instance(&instance, &LazyLocation::new(), None, &mut ctx);
+        if ctx.stack_exhausted {
+            return Self::evaluation_from_errors(vec![ValidationError::stack_exhausted(
+                Location::new(),
+            )]);
+        }
         match ctx.matches.take() {
             None => {
                 let arena = ctx.arena();

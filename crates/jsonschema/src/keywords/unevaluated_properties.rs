@@ -320,7 +320,7 @@ impl<F: Json> PropertyValidators<F> {
         // pending node resolves back to this same validators for the same instance.
         let validators_id = std::ptr::from_ref(self) as usize;
         let identity = instance.identity();
-        if ctx.enter_marking(validators_id, identity) {
+        if ctx.stack_low() || ctx.enter_marking(validators_id, identity) {
             return;
         }
         self.mark_evaluated_properties_inner(instance, properties, ctx, include_unevaluated);
@@ -514,6 +514,10 @@ fn compile_pending_property_validators<'a, F: Json>(
     ctx: &compiler::Context<'_, F>,
     parent: &'a Map<String, Value>,
 ) -> Result<PendingPropertyValidators<F>, ValidationError<'a>> {
+    // This recursion follows references without passing `compile_with_internal`.
+    if crate::stack::low() {
+        return Err(ValidationError::stack_exhausted(ctx.location().clone()));
+    }
     // Create a pending node and cache it before compiling to handle circular refs
     let pending = Arc::new(OnceLock::new());
     let shadowed = ctx.cache_pending_property_validators_for_schema(parent, pending.clone());
