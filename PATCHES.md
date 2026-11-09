@@ -104,3 +104,30 @@ on any account.
 
 **Upstream.** Not reported yet. The patch retires when a release stops these
 shapes and every case of `tests/stack.rs`.
+
+## Translate capturing groups as non-capturing (Boundless #660)
+
+**Reason.** `pattern` and `patternProperties` ask only whether a match exists,
+but the ECMA-262 translator preserves capturing groups. A pattern consisting
+of `[01]*1[01]{20}[^01]` and 1,000 `(a?)` groups over 100,000 pseudo-random
+bits allocated about 132.7 MB in one search. Non-capturing groups use about
+4.1 MB (about 2.2 MB under Boundless's 1 MiB pattern limits).
+
+**Patch.** The translator replaces ordinary and named capturing openers with
+`(?:`. Its offsets track bytes removed as well as added. Unsupported
+lookaround and backreferences return before the visitor, as upstream does;
+the patch changes no cancellation, timeout, close, retry or error path.
+
+**Regression evidence.** Seven unit cases in `crates/jsonschema-regex/src/lib.rs`
+cover ordinary, repeated, nested and named groups, unchanged flag and
+non-capturing groups, class escapes and parentheses that are not groups.
+Boundless's content-memory tests also check match answers and the capture
+case's allocation. Implementation verification is recorded with the pinning
+change; the earlier design probe passed all 321 translator tests.
+
+**Boundless code that relies on it.** `configured()` and `pattern_matches` in
+`crates/json/src/validation.rs`.
+
+**Upstream.** PR drafted, not submitted. Retire this patch and its pin when an
+upstream release translates match-only captures as non-capturing. Upstream
+submission waits until the Boundless implementations are verified.
