@@ -792,19 +792,33 @@ impl<F: Json> Validator<F> {
     #[must_use]
     #[inline]
     pub fn is_valid(&self, instance: F::Node<'_>) -> bool {
+        self.try_is_valid(instance).unwrap_or(false)
+    }
+
+    /// Check validity without mistaking stack exhaustion for an invalid instance.
+    ///
+    /// # Errors
+    ///
+    /// Returns `StackExhausted` when the check did not establish a verdict.
+    #[inline]
+    pub fn try_is_valid(&self, instance: F::Node<'_>) -> Result<bool, ValidationError<'static>> {
         let mut ctx = ValidationContext::new();
         let valid = self.root.is_valid(&instance, &mut ctx);
         if ctx.stack_exhausted {
-            return false;
+            return Err(ValidationError::stack_exhausted(Location::new()));
         }
         match ctx.matches {
-            None => valid,
+            None => Ok(valid),
             Some(first) => self.valid_under_every_outcome(&instance, *first),
         }
     }
 
     #[cold]
-    fn valid_under_every_outcome(&self, instance: &F::Node<'_>, first: MatchAssumptions) -> bool {
+    fn valid_under_every_outcome(
+        &self,
+        instance: &F::Node<'_>,
+        first: MatchAssumptions,
+    ) -> Result<bool, ValidationError<'static>> {
         let mut stack_exhausted = false;
         let valid = unfinished_matches::validity(assume_each_outcome(
             |matches| {
@@ -814,7 +828,11 @@ impl<F: Json> Validator<F> {
             },
             first,
         ));
-        valid && !stack_exhausted
+        if stack_exhausted {
+            Err(ValidationError::stack_exhausted(Location::new()))
+        } else {
+            Ok(valid)
+        }
     }
 
     #[cold]

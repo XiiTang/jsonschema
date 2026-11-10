@@ -158,6 +158,13 @@ fn is_valid_refuses_a_chain_too_long_for_the_stack() {
     let schema = any_of(50_000);
     on_stack(move || {
         let validator = jsonschema::validator_for(&schema).expect("the chain builds");
+        let failure = validator
+            .try_is_valid(&json!(1))
+            .expect_err("no verdict was established");
+        assert!(matches!(
+            failure.kind(),
+            ValidationErrorKind::StackExhausted
+        ));
         assert!(!validator.is_valid(&json!(1)));
     });
 }
@@ -165,10 +172,12 @@ fn is_valid_refuses_a_chain_too_long_for_the_stack() {
 #[test]
 fn a_short_chain_answers_as_before() {
     fn check(validator: &Validator, valid: &Value, invalid: &Value, expected: &str) {
+        assert!(validator.try_is_valid(valid).unwrap());
         assert!(validator.is_valid(valid));
         assert!(validator.validate(valid).is_ok());
         assert_eq!(validator.iter_errors(valid).count(), 0);
         assert!(validator.evaluate(valid).flag().valid);
+        assert!(!validator.try_is_valid(invalid).unwrap());
         assert!(!validator.is_valid(invalid));
         let errors: Vec<String> = validator
             .iter_errors(invalid)

@@ -55,6 +55,14 @@ or retry path, and no answer of a compile or check that finishes.
   `validate` returns it, `evaluate` reports it as its only error and `is_valid`
   returns `false`, so nothing computed after the flag was set becomes a verdict.
 
+  `try_is_valid` (Boundless #660, M40) exposes the same exhaustion as a
+  `Result<bool, ValidationError<'static>>`; `is_valid` delegates and retains
+  its `false` answer on exhaustion. A boolean-first caller that skips its
+  error walk can now preserve the exhaustion refusal instead of claiming
+  that an input violates the schema. The outcome-run path preserves the
+  exhaustion too. `tests/stack.rs` checks the error and the unchanged bool,
+  and ordinary true/false answers. Upstream has only the boolean entry.
+
 - Release: `Drop for SchemaNodeInner` (`node.rs`), the one type every owning
   edge between nodes passes, tests it; when low it moves the node's validators
   out and drops them inside `stacker::grow` on a new 1 MiB segment
@@ -121,7 +129,7 @@ the patch changes no cancellation, timeout, close, retry or error path.
 **Regression evidence.** Seven unit cases in `crates/jsonschema-regex/src/lib.rs`
 cover ordinary, repeated, nested and named groups, unchanged flag and
 non-capturing groups, class escapes and parentheses that are not groups.
-Boundless's content-memory tests also check match answers and the capture
+Boundless's T12 content-memory tests check match answers and the capture
 case's allocation. Implementation verification is recorded with the pinning
 change; the earlier design probe passed all 321 translator tests.
 
